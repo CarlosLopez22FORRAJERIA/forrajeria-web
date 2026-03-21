@@ -21,6 +21,9 @@ class SQLiteLikeRow(dict):
 
 
 def sqlite_like_row_factory(cursor):
+    if cursor.description is None:
+        return lambda values: values
+
     cols = [desc.name if hasattr(desc, "name") else desc[0] for desc in cursor.description]
 
     def make_row(values):
@@ -276,7 +279,7 @@ class Database:
 
         if filtro:
             like = f"%{filtro}%"
-            where.append("(codigo LIKE ? OR nombre LIKE ? OR categoria LIKE ?)")
+            where.append("(codigo LIKE %s OR nombre LIKE %s OR categoria LIKE %s)")
             params.extend([like, like, like])
 
         if solo_activos:
