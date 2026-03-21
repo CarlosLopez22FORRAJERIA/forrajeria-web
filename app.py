@@ -1,28 +1,45 @@
-import sqlite3
+import os
 from datetime import datetime
+
+import psycopg
+from psycopg import errors
 from flask import Flask, request, redirect, url_for, flash, render_template_string
 
 app = Flask(__name__)
 app.secret_key = "forrajeria_secret_key"
 
-DB_NAME = "forrajeria_web.db"
+DATABASE_URL = os.environ.get("DATABASE_URL")
 MARGEN_BOLSA = 0.30
 MARGEN_KG = 0.40
 
+
+class SQLiteLikeRow(dict):
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return list(self.values())[key]
+        return super().__getitem__(key)
+
+
+def sqlite_like_row_factory(cursor):
+    cols = [desc.name if hasattr(desc, "name") else desc[0] for desc in cursor.description]
+
+    def make_row(values):
+        return SQLiteLikeRow(zip(cols, values))
+
+    return make_row
 
 # =========================
 # BASE DE DATOS
 # =========================
 class Database:
-    def __init__(self, db_name=DB_NAME):
-        self.db_name = db_name
+    def __init__(self, database_url=DATABASE_URL):
+        self.database_url = database_url
         self.crear_tablas()
         self.migrar_tablas()
 
     def conectar(self):
-        conn = sqlite3.connect(self.db_name)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
+        conn = psycopg.connect(self.database_url, row_factory=sqlite_like_row_factory)
+        conn.autocommit = False
         return conn
 
     def crear_tablas(self):
@@ -31,7 +48,7 @@ class Database:
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS productos (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id BIGSERIAL PRIMARY KEY,
                 codigo TEXT UNIQUE NOT NULL,
                 nombre TEXT NOT NULL,
                 categoria TEXT,
@@ -50,7 +67,7 @@ class Database:
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS proveedores (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id BIGSERIAL PRIMARY KEY,
                 nombre TEXT UNIQUE NOT NULL,
                 telefono TEXT,
                 direccion TEXT,
@@ -60,7 +77,7 @@ class Database:
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS compras (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id BIGSERIAL PRIMARY KEY,
                 fecha TEXT NOT NULL,
                 proveedor_id INTEGER NOT NULL,
                 total REAL NOT NULL,
@@ -72,7 +89,7 @@ class Database:
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS detalle_compra (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id BIGSERIAL PRIMARY KEY,
                 compra_id INTEGER NOT NULL,
                 producto_id INTEGER NOT NULL,
                 tipo_compra TEXT NOT NULL,
@@ -86,7 +103,7 @@ class Database:
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS ventas (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id BIGSERIAL PRIMARY KEY,
                 fecha TEXT NOT NULL,
                 total REAL NOT NULL
             )
@@ -94,7 +111,7 @@ class Database:
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS detalle_venta (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id BIGSERIAL PRIMARY KEY,
                 venta_id INTEGER NOT NULL,
                 producto_id INTEGER NOT NULL,
                 tipo_venta TEXT NOT NULL,
@@ -108,7 +125,7 @@ class Database:
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS movimientos_stock (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id BIGSERIAL PRIMARY KEY,
                 fecha TEXT NOT NULL,
                 producto_id INTEGER NOT NULL,
                 tipo_movimiento TEXT NOT NULL,
@@ -128,13 +145,21 @@ class Database:
         conn = self.conectar()
         cur = conn.cursor()
 
-        cur.execute("PRAGMA table_info(compras)")
-        cols = [r[1] for r in cur.fetchall()]
+        cur.execute("""
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name = 'compras'
+        """)
+        cols = [r[0] for r in cur.fetchall()]
         if "estado" not in cols:
             cur.execute("ALTER TABLE compras ADD COLUMN estado TEXT NOT NULL DEFAULT 'ACTIVA'")
 
-        cur.execute("PRAGMA table_info(productos)")
-        cols = [r[1] for r in cur.fetchall()]
+        cur.execute("""
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name = 'productos'
+        """)
+        cols = [r[0] for r in cur.fetchall()]
         if "activo" not in cols:
             cur.execute("ALTER TABLE productos ADD COLUMN activo INTEGER NOT NULL DEFAULT 1")
 
@@ -153,7 +178,7 @@ class Database:
             INSERT INTO movimientos_stock (
                 fecha, producto_id, tipo_movimiento, referencia, cantidad,
                 stock_anterior, stock_resultante, observaciones
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             fecha, producto_id, tipo_movimiento, referencia, cantidad,
             stock_anterior, stock_resultante, observaciones
@@ -163,10 +188,10 @@ class Database:
         conn = self.conectar()
         cur = conn.cursor()
 
-        cur.execute("SELECT COUNT(*) FROM detalle_compra WHERE producto_id = ?", (producto_id,))
+        cur.execute("SELECT COUNT(*) FROM detalle_compra WHERE producto_id = %s", (producto_id,))
         compras = cur.fetchone()[0]
 
-        cur.execute("SELECT COUNT(*) FROM detalle_venta WHERE producto_id = ?", (producto_id,))
+        cur.execute("SELECT COUNT(*) FROM detalle_venta WHERE producto_id = %s", (producto_id,))
         ventas = cur.fetchone()[0]
 
         conn.close()
@@ -184,11 +209,11 @@ class Database:
                     codigo, nombre, categoria, unidad_base, es_fraccionado, peso_bolsa,
                     precio_compra, precio_venta, precio_venta_bolsa, precio_venta_kg,
                     stock, stock_minimo, activo
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 1)
             """, datos)
             conn.commit()
             return True, "Producto agregado correctamente."
-        except sqlite3.IntegrityError as e:
+        except errors.UniqueViolation as e:
             return False, f"No se pudo guardar. {e}"
         except Exception as e:
             return False, f"Error al guardar producto: {e}"
@@ -201,14 +226,14 @@ class Database:
         try:
             cur.execute("""
                 UPDATE productos
-                SET codigo=?, nombre=?, categoria=?, unidad_base=?, es_fraccionado=?, peso_bolsa=?,
-                    precio_compra=?, precio_venta=?, precio_venta_bolsa=?, precio_venta_kg=?,
-                    stock=?, stock_minimo=?
-                WHERE id=?
+                SET codigo=%s, nombre=%s, categoria=%s, unidad_base=%s, es_fraccionado=%s, peso_bolsa=%s,
+                    precio_compra=%s, precio_venta=%s, precio_venta_bolsa=%s, precio_venta_kg=%s,
+                    stock=%s, stock_minimo=%s
+                WHERE id=%s
             """, (*datos, producto_id))
             conn.commit()
             return True, "Producto actualizado correctamente."
-        except sqlite3.IntegrityError as e:
+        except errors.UniqueViolation as e:
             return False, f"No se pudo actualizar. {e}"
         except Exception as e:
             return False, f"Error al actualizar producto: {e}"
@@ -222,7 +247,7 @@ class Database:
             if self.producto_tiene_operaciones(producto_id):
                 return False, "El producto ya tiene compras o ventas. Conviene desactivarlo."
 
-            cur.execute("DELETE FROM productos WHERE id = ?", (producto_id,))
+            cur.execute("DELETE FROM productos WHERE id = %s", (producto_id,))
             conn.commit()
             return True, "Producto eliminado correctamente."
         except Exception as e:
@@ -234,7 +259,7 @@ class Database:
         conn = self.conectar()
         cur = conn.cursor()
         try:
-            cur.execute("UPDATE productos SET activo = ? WHERE id = ?", (1 if activo else 0, producto_id))
+            cur.execute("UPDATE productos SET activo = %s WHERE id = %s", (1 if activo else 0, producto_id))
             conn.commit()
             return True, "Estado actualizado."
         except Exception as e:
@@ -282,7 +307,7 @@ class Database:
                    precio_compra, precio_venta, precio_venta_bolsa, precio_venta_kg,
                    stock, stock_minimo, activo
             FROM productos
-            WHERE id = ?
+            WHERE id = %s
         """, (producto_id,))
         row = cur.fetchone()
         conn.close()
@@ -310,11 +335,11 @@ class Database:
         try:
             cur.execute("""
                 INSERT INTO proveedores (nombre, telefono, direccion, observaciones)
-                VALUES (?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s)
             """, datos)
             conn.commit()
             return True, "Proveedor agregado correctamente."
-        except sqlite3.IntegrityError:
+        except errors.UniqueViolation:
             return False, "Ya existe un proveedor con ese nombre."
         finally:
             conn.close()
@@ -337,7 +362,7 @@ class Database:
         cur.execute("""
             SELECT id, nombre, telefono, direccion, observaciones
             FROM proveedores
-            WHERE id = ?
+            WHERE id = %s
         """, (proveedor_id,))
         row = cur.fetchone()
         conn.close()
@@ -349,12 +374,12 @@ class Database:
         try:
             cur.execute("""
                 UPDATE proveedores
-                SET nombre=?, telefono=?, direccion=?, observaciones=?
-                WHERE id=?
+                SET nombre=%s, telefono=%s, direccion=%s, observaciones=%s
+                WHERE id=%s
             """, (*datos, proveedor_id))
             conn.commit()
             return True, "Proveedor actualizado correctamente."
-        except sqlite3.IntegrityError:
+        except errors.UniqueViolation:
             return False, "No se pudo actualizar."
         finally:
             conn.close()
@@ -363,7 +388,7 @@ class Database:
         conn = self.conectar()
         cur = conn.cursor()
         try:
-            cur.execute("DELETE FROM proveedores WHERE id = ?", (proveedor_id,))
+            cur.execute("DELETE FROM proveedores WHERE id = %s", (proveedor_id,))
             conn.commit()
             return True, "Proveedor eliminado."
         except Exception as e:
@@ -383,14 +408,15 @@ class Database:
 
             cur.execute("""
                 INSERT INTO compras (fecha, proveedor_id, total, observaciones, estado)
-                VALUES (?, ?, ?, ?, 'ACTIVA')
+                VALUES (%s, %s, %s, %s, 'ACTIVA')
+                RETURNING id
             """, (fecha, proveedor_id, total, observaciones))
-            compra_id = cur.lastrowid
+            compra_id = cur.fetchone()[0]
 
             for item in items:
                 cur.execute("""
                     INSERT INTO detalle_compra (compra_id, producto_id, tipo_compra, cantidad, costo_unitario, subtotal)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    VALUES (%s, %s, %s, %s, %s, %s)
                 """, (
                     compra_id,
                     item["producto_id"],
@@ -403,7 +429,7 @@ class Database:
                 cur.execute("""
                     SELECT es_fraccionado, peso_bolsa, stock, precio_compra
                     FROM productos
-                    WHERE id = ?
+                    WHERE id = %s
                 """, (item["producto_id"],))
                 prod_db = cur.fetchone()
                 if not prod_db:
@@ -432,8 +458,8 @@ class Database:
 
                     cur.execute("""
                         UPDATE productos
-                        SET stock = ?, precio_compra = ?, precio_venta_bolsa = ?, precio_venta_kg = ?
-                        WHERE id = ?
+                        SET stock = %s, precio_compra = %s, precio_venta_bolsa = %s, precio_venta_kg = %s
+                        WHERE id = %s
                     """, (nuevo_stock, costo_bolsa, precio_bolsa, precio_kg, item["producto_id"]))
 
                     self.registrar_movimiento_stock(
@@ -463,8 +489,8 @@ class Database:
 
                     cur.execute("""
                         UPDATE productos
-                        SET stock = ?, precio_compra = ?, precio_venta = ?
-                        WHERE id = ?
+                        SET stock = %s, precio_compra = %s, precio_venta = %s
+                        WHERE id = %s
                     """, (nuevo_stock, costo_promedio, precio_venta, item["producto_id"]))
 
                     self.registrar_movimiento_stock(
@@ -506,7 +532,7 @@ class Database:
             SELECT pr.codigo, pr.nombre, dc.tipo_compra, dc.cantidad, dc.costo_unitario, dc.subtotal
             FROM detalle_compra dc
             INNER JOIN productos pr ON pr.id = dc.producto_id
-            WHERE dc.compra_id = ?
+            WHERE dc.compra_id = %s
             ORDER BY pr.nombre
         """, (compra_id,))
         rows = cur.fetchall()
@@ -517,7 +543,7 @@ class Database:
         conn = self.conectar()
         cur = conn.cursor()
         try:
-            cur.execute("SELECT estado FROM compras WHERE id = ?", (compra_id,))
+            cur.execute("SELECT estado FROM compras WHERE id = %s", (compra_id,))
             fila = cur.fetchone()
             if not fila:
                 return False, "La compra no existe."
@@ -528,7 +554,7 @@ class Database:
                 SELECT dc.producto_id, dc.cantidad, p.es_fraccionado, p.peso_bolsa, p.stock, p.nombre
                 FROM detalle_compra dc
                 INNER JOIN productos p ON p.id = dc.producto_id
-                WHERE dc.compra_id = ?
+                WHERE dc.compra_id = %s
             """, (compra_id,))
             detalles = cur.fetchall()
 
@@ -540,7 +566,7 @@ class Database:
                     conn.rollback()
                     return False, f"No se puede anular porque '{nombre}' quedaría con stock negativo."
 
-                cur.execute("UPDATE productos SET stock = ? WHERE id = ?", (nuevo_stock, producto_id))
+                cur.execute("UPDATE productos SET stock = %s WHERE id = %s", (nuevo_stock, producto_id))
 
                 self.registrar_movimiento_stock(
                     cur,
@@ -553,7 +579,7 @@ class Database:
                     "Compra anulada"
                 )
 
-            cur.execute("UPDATE compras SET estado = 'ANULADA' WHERE id = ?", (compra_id,))
+            cur.execute("UPDATE compras SET estado = 'ANULADA' WHERE id = %s", (compra_id,))
             conn.commit()
             return True, "Compra anulada correctamente y stock revertido."
         except Exception as e:
@@ -566,14 +592,14 @@ class Database:
         conn = self.conectar()
         cur = conn.cursor()
         try:
-            cur.execute("SELECT estado FROM compras WHERE id = ?", (compra_id,))
+            cur.execute("SELECT estado FROM compras WHERE id = %s", (compra_id,))
             fila = cur.fetchone()
             if not fila:
                 return False, "La compra no existe."
             if fila[0] != "ANULADA":
                 return False, "Solo se puede eliminar una compra anulada."
 
-            cur.execute("DELETE FROM compras WHERE id = ?", (compra_id,))
+            cur.execute("DELETE FROM compras WHERE id = %s", (compra_id,))
             conn.commit()
             return True, "Compra eliminada."
         except Exception as e:
@@ -592,13 +618,13 @@ class Database:
             total = sum(item["subtotal"] for item in items)
             fecha = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-            cur.execute("INSERT INTO ventas (fecha, total) VALUES (?, ?)", (fecha, total))
-            venta_id = cur.lastrowid
+            cur.execute("INSERT INTO ventas (fecha, total) VALUES (%s, %s) RETURNING id", (fecha, total))
+            venta_id = cur.fetchone()[0]
 
             for item in items:
                 cur.execute("""
                     INSERT INTO detalle_venta (venta_id, producto_id, tipo_venta, cantidad, precio_unitario, subtotal)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    VALUES (%s, %s, %s, %s, %s, %s)
                 """, (
                     venta_id,
                     item["producto_id"],
@@ -611,7 +637,7 @@ class Database:
                 cur.execute("""
                     SELECT stock, es_fraccionado, peso_bolsa, nombre
                     FROM productos
-                    WHERE id = ?
+                    WHERE id = %s
                 """, (item["producto_id"],))
                 prod_db = cur.fetchone()
                 if not prod_db:
@@ -628,7 +654,7 @@ class Database:
                 if nuevo_stock < 0:
                     raise ValueError(f"Stock insuficiente para '{nombre}'.")
 
-                cur.execute("UPDATE productos SET stock = ? WHERE id = ?", (nuevo_stock, item["producto_id"]))
+                cur.execute("UPDATE productos SET stock = %s WHERE id = %s", (nuevo_stock, item["producto_id"]))
 
                 self.registrar_movimiento_stock(
                     cur,
@@ -668,7 +694,7 @@ class Database:
             SELECT pr.codigo, pr.nombre, dv.tipo_venta, dv.cantidad, dv.precio_unitario, dv.subtotal
             FROM detalle_venta dv
             INNER JOIN productos pr ON pr.id = dv.producto_id
-            WHERE dv.venta_id = ?
+            WHERE dv.venta_id = %s
             ORDER BY pr.nombre
         """, (venta_id,))
         rows = cur.fetchall()
@@ -683,7 +709,7 @@ class Database:
                 SELECT dv.producto_id, dv.tipo_venta, dv.cantidad, p.es_fraccionado, p.peso_bolsa, p.stock
                 FROM detalle_venta dv
                 INNER JOIN productos p ON p.id = dv.producto_id
-                WHERE dv.venta_id = ?
+                WHERE dv.venta_id = %s
             """, (venta_id,))
             detalles = cur.fetchall()
 
@@ -698,7 +724,7 @@ class Database:
 
                 nuevo_stock = stock_actual + devolver
 
-                cur.execute("UPDATE productos SET stock = ? WHERE id = ?", (nuevo_stock, producto_id))
+                cur.execute("UPDATE productos SET stock = %s WHERE id = %s", (nuevo_stock, producto_id))
 
                 self.registrar_movimiento_stock(
                     cur,
@@ -711,7 +737,7 @@ class Database:
                     "Venta eliminada del registro"
                 )
 
-            cur.execute("DELETE FROM ventas WHERE id = ?", (venta_id,))
+            cur.execute("DELETE FROM ventas WHERE id = %s", (venta_id,))
             conn.commit()
             return True, "Venta eliminada y stock devuelto."
         except Exception as e:
@@ -736,7 +762,7 @@ class Database:
                        COALESCE(ms.observaciones, '') AS observaciones
                 FROM movimientos_stock ms
                 INNER JOIN productos p ON p.id = ms.producto_id
-                WHERE p.codigo LIKE ? OR p.nombre LIKE ? OR ms.tipo_movimiento LIKE ? OR ms.referencia LIKE ?
+                WHERE p.codigo LIKE %s OR p.nombre LIKE %s OR ms.tipo_movimiento LIKE %s OR ms.referencia LIKE %s
                 ORDER BY ms.id DESC
             """, (like, like, like, like))
         else:
@@ -1953,8 +1979,6 @@ def movimientos_stock():
 # =========================
 # RUN
 # =========================
-import os
-
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port, debug=False)
