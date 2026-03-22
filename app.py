@@ -406,7 +406,7 @@ class Database:
         conn = self.conectar()
         cur = conn.cursor()
         try:
-            total = sum(item["subtotal"] for item in items)
+            total = sum(float(str(item["subtotal"]).replace(",", ".")) for item in items)
             fecha = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
             cur.execute("""
@@ -618,7 +618,7 @@ class Database:
         conn = self.conectar()
         cur = conn.cursor()
         try:
-            total = sum(item["subtotal"] for item in items)
+            total = sum(float(str(item["subtotal"]).replace(",", ".")) for item in items)
             fecha = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
             cur.execute("INSERT INTO ventas (fecha, total) VALUES (%s, %s) RETURNING id", (fecha, total))
