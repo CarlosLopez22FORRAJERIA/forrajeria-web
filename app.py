@@ -19,6 +19,9 @@ class SQLiteLikeRow(dict):
             return list(self.values())[key]
         return super().__getitem__(key)
 
+    def __iter__(self):
+        return iter(self.values())
+
 
 def sqlite_like_row_factory(cursor):
     if cursor.description is None:
