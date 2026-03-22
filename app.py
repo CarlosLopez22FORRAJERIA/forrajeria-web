@@ -476,7 +476,7 @@ class Database:
                         observaciones or "Compra registrada"
                     )
                 else:
-                    cantidad_base = item["cantidad"]
+                    cantidad_base = float(str(item["cantidad"]).replace(",", "."))
                     nuevo_stock = stock_actual + cantidad_base
 
                     if stock_actual <= 0:
