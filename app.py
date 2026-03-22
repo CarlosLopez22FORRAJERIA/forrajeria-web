@@ -441,7 +441,7 @@ class Database:
                 es_fraccionado, peso_bolsa, stock_actual, precio_compra_actual = prod_db
 
                 if es_fraccionado:
-                    cantidad_base = item["cantidad"] * peso_bolsa
+                    cantidad_base = float(str(item["cantidad"]).replace(",", ".")) * peso_bolsa
                     nuevo_stock = stock_actual + cantidad_base
 
                     costo_actual_por_kg = (precio_compra_actual / peso_bolsa) if peso_bolsa > 0 else 0
@@ -480,11 +480,11 @@ class Database:
                     nuevo_stock = stock_actual + cantidad_base
 
                     if stock_actual <= 0:
-                        costo_promedio = item["costo_unitario"]
+                        costo_promedio = float(str(item["costo_unitario"]).replace(",", "."))
                     else:
                         costo_promedio = (
                             (stock_actual * precio_compra_actual) +
-                            (cantidad_base * item["costo_unitario"])
+                            (cantidad_base * float(str(item["costo_unitario"]).replace(",", ".")))
                         ) / nuevo_stock
 
                     costo_promedio = round(costo_promedio, 2)
